@@ -1,0 +1,335 @@
+esphome:
+  name: screek-bp2-poe
+  comment: SCREEK Bluetooth Proxy BP2-POE
+  friendly_name: Bluetooth Proxy BP2-POE
+  min_version: 2025.11.0
+  name_add_mac_suffix: true
+  project: 
+    name: SCREEK.Bluetooth_Proxy BP2-POE
+    version: 26.01.23-A
+  on_boot:
+    priority: -200.0
+    then:
+      - lambda: |-
+          ESP_LOGI("on_boot", "Applying BLE active scan: %s", id(ble_active_scan_enabled) ? "ON" : "OFF");
+          id(ble_tracker).set_scan_active(id(ble_active_scan_enabled));
+          constexpr float BLE_UNIT_MS = 0.625f;
+
+          auto clamp_u16 = [](uint16_t v, uint16_t min_v, uint16_t max_v) -> uint16_t {
+            if (v < min_v) return min_v;
+            if (v > max_v) return max_v;
+            return v;
+          };
+
+          // interval: 320–1100 ms
+          uint16_t interval_ms = clamp_u16(id(ble_scan_interval_ms), 320, 1100);
+          // window: 30–1100 ms
+          uint16_t window_ms   = clamp_u16(id(ble_scan_window_ms),   30,  1100);
+
+          uint16_t interval_units = interval_ms / BLE_UNIT_MS;
+          uint16_t window_units   = window_ms   / BLE_UNIT_MS;
+
+          ESP_LOGI("ble_scan",
+                   "Apply BLE scan timing: interval=%ums window=%ums",
+                   interval_ms, window_ms);
+
+          id(ble_tracker).set_scan_interval(interval_units);
+          id(ble_tracker).set_scan_window(window_units);
+
+esp32:
+  board: esp32-s3-devkitc1-n16r8
+  variant: esp32s3
+  framework:
+    type: esp-idf
+    advanced: 
+      compiler_optimization: perf
+      execute_from_psram: true
+  cpu_frequency: 240MHz
+  flash_size: 16MB
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+safe_mode:
+  num_attempts: 20
+
+api:
+  id: ha_api
+  on_client_connected:
+    then:
+      - lambda: |-
+          if (id(heap_free).has_state()) {
+            id(heap_free_kb).publish_state(id(heap_free).state / 1024.0);
+          }
+
+          if (id(cpu_freq_hz).has_state()) {
+            id(cpu_freq_mhz).publish_state(id(cpu_freq_hz).state / 1000000.0);
+          }
+
+logger:
+  level: DEBUG # VERBOSE, DEBUG, INFO, WARN, ERROR
+
+ethernet:
+  type: W5500
+  clk_pin: GPIO13
+  mosi_pin: GPIO11
+  miso_pin: GPIO12
+  cs_pin: GPIO14
+  interrupt_pin: GPIO10
+  reset_pin: GPIO9
+  clock_speed: 25Mhz 
+
+esp32_ble:
+  # https://next.esphome.io/components/esp32_ble/
+  max_connections: 4
+
+ota:
+  - platform: esphome
+    password: !secret bp2_poe_ota_password
+    id: ota_esphome
+
+globals:
+  - id: ble_active_scan_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+
+  - id: ble_scan_interval_ms
+    type: uint16_t
+    restore_value: true
+    initial_value: '1100'
+
+  - id: ble_scan_window_ms
+    type: uint16_t
+    restore_value: true
+    initial_value: '1100'
+
+esp32_ble_tracker:
+  id: ble_tracker
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: false
+
+bluetooth_proxy:
+  active: true
+  connection_slots: 4 # 增加到四个蓝牙槽位
+
+
+debug:
+  update_interval: 30s
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+text_sensor:
+  - platform: ethernet_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+    mac_address:
+      name: "MAC Address"
+      entity_category: diagnostic
+    # hostname:
+    #   name: "NET Hostname"
+    #   entity_category: diagnostic
+
+  - platform: uptime
+    name: Uptime
+    entity_category: diagnostic
+
+  - platform: debug
+    reset_reason:
+      name: Reboot Reason
+      entity_category: diagnostic
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_rgb
+    name: Identify LED
+    pin: GPIO21
+    num_leds: 1
+    rgb_order: GRB
+    chipset: WS2812
+    # restore_mode: ALWAYS_OFF
+    entity_category: config
+
+sensor:
+  - platform: template
+    id: heap_free_kb
+    name: Heap Free
+    unit_of_measurement: "KB"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      if (id(heap_free).has_state()) {
+        return id(heap_free).state / 1024.0;
+      }
+      return NAN;
+  - platform: template
+    id: cpu_freq_mhz
+    name: CPU Frequency
+    unit_of_measurement: "MHz"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 600s
+    lambda: |-
+      if (id(cpu_freq_hz).has_state()) {
+        return id(cpu_freq_hz).state / 1000000.0;
+      }
+      return NAN;
+  - platform: debug
+    free:
+      id: heap_free
+    loop_time:
+      name: "Loop Time"
+    cpu_frequency:
+      id: cpu_freq_hz
+
+  - platform: internal_temperature
+    name: CPU Temperature
+    update_interval: 60s
+    entity_category: diagnostic
+
+button:
+  - platform: restart
+    id: reboot_btn
+    name: Reboot Device
+    entity_category: config
+    disabled_by_default: false
+
+  - platform: safe_mode
+    id: button_safe_mode
+    name: Safe Mode Boot
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: factory_reset
+    id: factory_reset_btn
+    name: Factory Reset
+    entity_category: config
+    disabled_by_default: false
+
+switch:
+  - platform: template
+    id: ble_active_scan_switch
+    name: Scan Active Mode
+    icon: mdi:bluetooth-settings
+    entity_category: config
+    restore_mode: DISABLED
+    lambda: |-
+      return id(ble_active_scan_enabled);
+    turn_on_action:
+      - lambda: |-
+          id(ble_active_scan_enabled) = true;
+          ESP_LOGI("ble_scan", "Active BLE Scan -> ON");
+          id(ble_tracker).set_scan_active(true);
+          if (id(ha_api).is_connected()) {
+            delay(200);
+            ESP_LOGI("ble_scan", "Rebooting device now...");
+            App.safe_reboot();
+          }
+    turn_off_action:
+      - lambda: |-
+          id(ble_active_scan_enabled) = false;
+          ESP_LOGI("ble_scan", "Active BLE Scan -> OFF");
+          id(ble_tracker).set_scan_active(false);
+          if (id(ha_api).is_connected()) {
+            delay(200);
+            ESP_LOGI("ble_scan", "Rebooting device now...");
+            App.safe_reboot();
+          }
+
+number:
+  - platform: template
+    id: ble_scan_interval_ms_number
+    name: Scan Interval
+    icon: mdi:bluetooth-settings
+    entity_category: config
+    unit_of_measurement: ms
+    min_value: 320
+    max_value: 1100
+    step: 50
+    mode: slider
+    # restore_value: true
+    # optimistic: true
+    lambda: |-
+      return (float) id(ble_scan_interval_ms);
+    set_action:
+      - lambda: |-
+          constexpr float BLE_UNIT_MS = 0.625f;
+
+          auto clamp_u16 = [](uint16_t v, uint16_t min_v, uint16_t max_v) -> uint16_t {
+            if (v < min_v) return min_v;
+            if (v > max_v) return max_v;
+            return v;
+          };
+
+          uint16_t new_interval_ms = clamp_u16((uint16_t) x, 320, 1100);
+          uint16_t window_ms       = clamp_u16(id(ble_scan_window_ms), 30, 1100);
+
+          if (window_ms > new_interval_ms) {
+            window_ms = new_interval_ms;
+          }
+
+          id(ble_scan_interval_ms) = new_interval_ms;
+          id(ble_scan_window_ms)   = window_ms;
+
+          ESP_LOGI("ble_scan",
+                   "Update scan interval=%ums window=%ums (restart scan)",
+                   new_interval_ms, window_ms);
+
+          id(ble_tracker).stop_scan();
+      - delay: 500ms
+      - lambda: |-
+          id(ble_tracker).set_scan_interval(id(ble_scan_interval_ms) / 0.625f);
+          id(ble_tracker).set_scan_window(id(ble_scan_window_ms) / 0.625f);
+          id(ble_tracker).start_scan();
+
+  - platform: template
+    id: ble_scan_window_ms_number
+    name: Scan Window
+    icon: mdi:bluetooth-settings
+    entity_category: config
+    unit_of_measurement: ms
+    min_value: 30
+    max_value: 1100
+    step: 25
+    mode: slider
+    # restore_value: true
+    # optimistic: true
+    lambda: |-
+      return (float) id(ble_scan_window_ms);
+    set_action:
+      - lambda: |-
+          constexpr float BLE_UNIT_MS = 0.625f;
+
+          auto clamp_u16 = [](uint16_t v, uint16_t min_v, uint16_t max_v) -> uint16_t {
+            if (v < min_v) return min_v;
+            if (v > max_v) return max_v;
+            return v;
+          };
+
+          uint16_t interval_ms = clamp_u16(id(ble_scan_interval_ms), 320, 1100);
+          uint16_t new_window_ms = clamp_u16((uint16_t) x, 30, 1100);
+
+          if (new_window_ms > interval_ms) {
+            new_window_ms = interval_ms;
+          }
+
+          id(ble_scan_window_ms)   = new_window_ms;
+          id(ble_scan_interval_ms) = interval_ms;
+
+          ESP_LOGI("ble_scan",
+                   "Update scan interval=%ums window=%ums (restart scan)",
+                   interval_ms, new_window_ms);
+
+          id(ble_tracker).stop_scan();
+      - delay: 500ms
+      - lambda: |-
+          id(ble_tracker).set_scan_interval(id(ble_scan_interval_ms) / 0.625f);
+          id(ble_tracker).set_scan_window(id(ble_scan_window_ms) / 0.625f);
+          id(ble_tracker).start_scan();
