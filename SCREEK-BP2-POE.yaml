@@ -86,7 +86,7 @@ esp32_ble:
 
 ota:
   - platform: esphome
-    password: !secret bp2_poe_ota_password
+    password: "your_secure_password" # use a strong password for OTA updates
     id: ota_esphome
 
 globals:
